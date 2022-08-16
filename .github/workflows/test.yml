@@ -21,21 +21,16 @@ env:
 
 jobs:
   build-linux:
-    name: ${{ matrix.name }}
-    runs-on: ${{ matrix.os }}
+    name: "Name"
+    runs-on: ubuntu-20.04
+    #${{ matrix.os }}
     # Set environment variables from matrix parameters
     env:
-      CMP: ${{ matrix.cmp }}
-      BCFG: ${{ matrix.configuration }}
-      BASE: ${{ matrix.base }}
+      CMP: gcc
+      BCFG: default
+      BASE: "3.15"
     strategy:
       fail-fast: false
-      matrix:
-        - os: ubuntu-20.04
-          cmp: clang
-          configuration: default
-          base: "3.15"
-          name: "3.15 Ub-20 clang-10"
 
     steps:
     - uses: actions/checkout@v2
