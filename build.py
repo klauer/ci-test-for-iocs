@@ -4,10 +4,10 @@ import contextlib
 import logging
 import os
 import pathlib
-import shutil
 import re
+import shutil
 from dataclasses import dataclass
-from typing import Any, ClassVar, Deque, Dict, List, Optional
+from typing import Any, ClassVar, Dict, List, Optional
 
 import cue
 from whatrecord.makefile import Dependency, DependencyGroup, Makefile
@@ -106,7 +106,7 @@ class CueShim:
         self.group = self._set_primary_target(target_path)
 
     def _set_primary_target(self, path: pathlib.Path) -> DependencyGroup:
-        # TODO: RELEASE_SITE may need to be generated if unavailable; 
+        # TODO: RELEASE_SITE may need to be generated if unavailable;
         # see eco-tools
         release_site = path / "RELEASE_SITE"
         if release_site.exists():
@@ -166,45 +166,56 @@ class CueShim:
         self.dependency_by_variable[variable_name] = dep
 
         return dep
-        
 
-def test():
-    # get missing dependencies cloned into the cache
-    checked = set()
+    def find_all_dependencies(self):
+        """
+        Using module path conventions, find all dependencies and check them
+        out to the cache directory.
 
-    introspection_base = pathlib.Path("/Users/klauer/Repos/epics-base")
-    cue_shim = CueShim(pathlib.Path("ads-ioc"), introspection_base)
+        See Also
+        --------
+        :func:`VersionInfo.from_path`
+        """
+        checked = set()
 
-    def done() -> bool:
-        return all(
-            dep.variable_name in checked 
-            for dep in cue_shim.group.all_modules.values()
-        )
+        def done() -> bool:
+            return all(
+                dep.variable_name in checked
+                for dep in self.group.all_modules.values()
+            )
 
-    while not done():
-        deps = list(cue_shim.group.all_modules.values())
-        for dep in deps:
-            if dep.variable_name in checked:
-                continue
-            checked.add(dep.variable_name)
-
-            for var, path in dep.missing_paths.items():
-                if var in checked:
-                    if var not in cue_shim.dependency_by_variable:
-                        logger.warning("Dependency still missing; %s", var)
+        while not done():
+            deps = list(self.group.all_modules.values())
+            for dep in deps:
+                if dep.variable_name in checked:
                     continue
+                checked.add(dep.variable_name)
 
-                version_info = VersionInfo.from_path(path)
-                if version_info is None:
-                    logger.debug(
-                        "Dependency path for %r=%r does not match known patterns", var, path
-                    )
-                    continue
+                for var, path in dep.missing_paths.items():
+                    if var in checked:
+                        if var not in self.dependency_by_variable:
+                            logger.warning("Dependency still missing; %s", var)
+                        continue
 
-                cue_shim.add_dependency(var, version_info)
+                    version_info = VersionInfo.from_path(path)
+                    if version_info is None:
+                        logger.debug(
+                            "Dependency path for %r=%r does not match known patterns", var, path
+                        )
+                        continue
+
+                    self.add_dependency(var, version_info)
+
+
+def main():
+    cue_shim = CueShim(
+        target_path=pathlib.Path("ads-ioc"),
+        epics_base_for_introspection=pathlib.Path("/Users/klauer/Repos/epics-base"),
+    )
+    cue_shim.find_all_dependencies()
 
 
 if __name__ == "__main__":
     logging.basicConfig(level="WARNING")
     logger.setLevel("DEBUG")
-    test()
+    main()
