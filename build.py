@@ -6,7 +6,7 @@ import os
 import pathlib
 import re
 import shutil
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, ClassVar, Dict, List, Optional
 
 import cue
@@ -15,6 +15,13 @@ from whatrecord.makefile import Dependency, DependencyGroup, Makefile
 logger = logging.getLogger(__name__)
 
 MODULE_PATH = pathlib.Path(__file__).parent.resolve()
+
+
+@dataclass
+class CueOptions:
+    no_vcvars: bool = False
+    add_path: List[str] = field(default_factory=list)
+    timeout: int = 10000
 
 
 @dataclass
@@ -209,6 +216,9 @@ class CueShim:
                     self.add_dependency(var, version_info)
 
     def use_epics_base(self, tag: str):
+        # TODO ?
+        self._cue.building_base = True
+        self._cue.skip_dep_builds = True
         self.add_dependency(
             "EPICS_BASE",
             VersionInfo(
@@ -232,8 +242,10 @@ def main():
         epics_base_for_introspection=pathlib.Path("/Users/klauer/Repos/epics-base"),
     )
     cue_shim.find_all_dependencies()
-    cue_shim.use_epics_base("R3.15.9")
+    cue_shim.use_epics_base("R7.0.3.1-2.0.0")
     cue_shim.update_release_local()
+    # TODO: slac-epics/epics-base has absolute /afs submodule paths :(
+    # cue_shim._cue.prepare(CueOptions())
 
 
 if __name__ == "__main__":
