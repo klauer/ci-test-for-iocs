@@ -102,6 +102,7 @@ class CueShim:
         self._cue.prepare_env()
         self._cue.detect_context()
         self.dependency_by_variable = {}
+        self.version_by_variable = {}
         self.epics_base_for_introspection = epics_base_for_introspection.resolve()
         self.group = self._set_primary_target(target_path)
 
@@ -124,7 +125,7 @@ class CueShim:
             variables=dict(EPICS_BASE=str(self.epics_base_for_introspection)),
         )
 
-    def get_path_for_dependency(self, dep: VersionInfo) -> pathlib.Path:
+    def get_path_for_version_info(self, dep: VersionInfo) -> pathlib.Path:
         return self.module_cache_path / f"{dep.name}-{dep.tag}"
 
     def update_settings(self, settings: Dict[str, str], overwrite: bool = True):
@@ -145,6 +146,7 @@ class CueShim:
     def add_dependency(self, variable_name: str, version: VersionInfo) -> Dependency:
         logger.info("Updating cue settings for dependency %s: %s", variable_name, version)
         self.update_settings(version.to_cue(variable_name), overwrite=True)
+        self.version_by_variable[variable_name] = version
 
         def no_op(*args, **kwargs):
             ...
@@ -154,7 +156,7 @@ class CueShim:
         with monkeypatch(self._cue, "update_release_local", no_op):
             self._cue.add_dependency(variable_name)
 
-        cache_path = self.get_path_for_dependency(version)
+        cache_path = self.get_path_for_version_info(version)
         makefile = self.get_makefile_for_path(cache_path)
         dep = Dependency.from_makefile(
             makefile,
@@ -206,6 +208,23 @@ class CueShim:
 
                     self.add_dependency(var, version_info)
 
+    def use_epics_base(self, tag: str):
+        self.add_dependency(
+            "EPICS_BASE",
+            VersionInfo(
+                name="epics-base",
+                base=tag,
+                tag=tag,
+            )
+        )
+
+    def update_release_local(self):
+        for dep in self.dependency_by_variable.values():
+            version = self.version_by_variable[dep.variable_name]
+            dep_path = str(self.get_path_for_version_info(version))
+            logger.debug("Updating RELEASE.local: %s=%s", dep.variable_name, dep_path)
+            self._cue.update_release_local(dep.variable_name, dep_path)
+
 
 def main():
     cue_shim = CueShim(
@@ -213,6 +232,8 @@ def main():
         epics_base_for_introspection=pathlib.Path("/Users/klauer/Repos/epics-base"),
     )
     cue_shim.find_all_dependencies()
+    cue_shim.use_epics_base("R3.15.9")
+    cue_shim.update_release_local()
 
 
 if __name__ == "__main__":
