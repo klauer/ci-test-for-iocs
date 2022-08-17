@@ -183,6 +183,12 @@ class CueShim:
         self._cue.prepare_env()
         self._cue.detect_context()
 
+        # We want to build our dependencies because they are source
+        # distributions only.
+        self._cue.skip_dep_builds = False
+        # Force a recompilation step, no matter what cue says.
+        self._cue.do_recompile = True  # TODO
+
     def create_set_text(self):
         result = []
         # TODO: order based on dependency graph
@@ -302,16 +308,16 @@ class CueShim:
                     self.add_dependency(var, version_info)
 
     def use_epics_base(self, tag: str):
+        # "building base" means that the ci script is used _just_ for epics-base
+        # and is located in the current working directory (".").  Don't set it
+        # for our modules/IOCs.
         self._cue.building_base = False
-        self._cue.skip_dep_builds = False
-        self._cue.do_recompile = True  # TODO
         base_version = VersionInfo(
             name="epics-base",
             base=tag,
             tag=tag,
         )
         self.add_dependency("EPICS_BASE", base_version)
-        # self._cue.places["EPICS_BASE"] = str(self.get_path_for_version_info(base_version))
 
     def update_release_local(self):
         for dep in self.dependency_by_variable.values():
