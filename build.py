@@ -18,11 +18,36 @@ logger = logging.getLogger(__name__)
 MODULE_PATH = pathlib.Path(__file__).parent.resolve()
 
 
+# TODO: config file of sorts, or this becomes part of the SLAC-specific build
+# system
+repo_owner_overrides = {
+}
+
+repo_name_overrides = {
+    "base": "epics-base",
+}
+
+# When writing out cue .set files, use these prefixes instead of the build
+# variable names:
+cue_set_name_overrides = {
+    "EPICS_BASE": "BASE",
+}
+
+
 @dataclass
 class CueOptions:
+    # For all commands:
+
+    #: Assume vcvarsall.bat has already been run
     no_vcvars: bool = False
+    #: Append directory to $PATH or %%PATH%%.  Expands {ENVVAR}
     paths: List[str] = field(default_factory=list)
+    #: Terminate make after delay, in seconds.
     timeout: int = 10000
+    # for build:
+    makeargs: List[str] = field(default_factory=list)
+    # for exec:
+    cmd: List[str] = field(default_factory=list)
 
 
 @dataclass
@@ -54,12 +79,14 @@ class VersionInfo:
         return None
 
     def to_cue(self, variable_name: str) -> Dict[str, Any]:
+        prefix_name = variable_name
+        default_owner = cue.setup.get("REPOOWNER", "slac-epics")
         res = {
             "": self.tag or "master",
             "_DIRNAME": self.name,
-            "_REPONAME": self.name,
-            "_REPOOWNER": cue.setup.get("REPOOWNER", "slac-epics"),
-            "_VARNAME": variable_name,
+            "_REPONAME": repo_name_overrides.get(self.name, self.name),
+            "_REPOOWNER": repo_owner_overrides.get(default_owner, default_owner),
+            "_VARNAME": variable_name,  # for RELEASE.local
             "_RECURSIVE": "YES",
             "_DEPTH": "-1",
         }
@@ -67,7 +94,7 @@ class VersionInfo:
             **res
         )
         return {
-            f"{variable_name}{key}": value
+            f"{prefix_name}{key}": value
             for key, value in res.items()
         }
 
@@ -93,15 +120,26 @@ class CueShim:
     be.
     """
 
+    #: Cache path where all dependencies go.
     cache_path: pathlib.Path
-    group: DependencyGroup
+    #: whatrecord dependency information keyed by build variable name.
     dependency_by_variable: Dict[str, Dependency]
-    version_by_variable: Dict[str, VersionInfo]
+    #: epics-base to use in the initial setup stage with whatrecord, required
+    #: for the GNU make-based build system
     epics_base_for_introspection: pathlib.Path
-    set_path: pathlib.Path
-    cache_path: pathlib.Path
+    #: The top-level whatrecord dependency group which gets updated as we
+    #: check out more dependencies.
+    group: DependencyGroup
+    #: The subdirectory of the cache path where modules are stored.  Kept this
+    #: way for SLAC EPICS to have RELEASE_SITE there (TODO)
     module_cache_path: pathlib.Path
+    #: The default repository organization for modules.
+    repo_owner: str
+    #: Where generated cue.py 'set' files are to be stored.
     set_path: pathlib.Path
+    #: Version information by variable name, derived from whatrecord-provided
+    #: makefile introspection.
+    version_by_variable: Dict[str, VersionInfo]
 
     def __init__(
         self,
@@ -110,6 +148,7 @@ class CueShim:
         set_path: pathlib.Path = MODULE_PATH / "cache" / "sets",
         cache_path: pathlib.Path = MODULE_PATH / "cache",
         local: bool = False,
+        github_org: str = "slac-epics",
     ):
         self.cache_path = cache_path
         self.module_cache_path = cache_path / "modules"
@@ -119,6 +158,7 @@ class CueShim:
         self.group = self._set_primary_target(target_path)
         self.set_path = set_path
         self.local = local
+        self.github_org = github_org
         self._import_cue()
 
     def _import_cue(self):
@@ -132,12 +172,14 @@ class CueShim:
             if sys.platform == "darwin":
                 os.environ["RUNNER_OS"] = "macOS"
                 os.environ["CMP"] = "clang"
+                # os.environ["CMP"] = "gcc"
             else:
                 # untested
                 os.environ["RUNNER_OS"] = "Linux"
                 os.environ["CMP"] = "gcc-4.9"
 
         self._cue = cue
+        self._cue.setup["REPOOWNER"] = self.github_org
         self._cue.prepare_env()
         self._cue.detect_context()
 
@@ -145,7 +187,8 @@ class CueShim:
         result = []
         # TODO: order based on dependency graph
         for variable, version in reversed(self.version_by_variable.items()):
-            for key, value in version.to_cue(variable).items():
+            cue_set_name = cue_set_name_overrides.get(variable, variable)
+            for key, value in version.to_cue(cue_set_name).items():
                 result.append(f"{key}={value}")
         return "\n".join(result)
 
@@ -259,17 +302,16 @@ class CueShim:
                     self.add_dependency(var, version_info)
 
     def use_epics_base(self, tag: str):
-        # TODO ?
-        self._cue.building_base = True
-        self._cue.skip_dep_builds = True
-        self.add_dependency(
-            "EPICS_BASE",
-            VersionInfo(
-                name="epics-base",
-                base=tag,
-                tag=tag,
-            )
+        self._cue.building_base = False
+        self._cue.skip_dep_builds = False
+        self._cue.do_recompile = True  # TODO
+        base_version = VersionInfo(
+            name="epics-base",
+            base=tag,
+            tag=tag,
         )
+        self.add_dependency("EPICS_BASE", base_version)
+        # self._cue.places["EPICS_BASE"] = str(self.get_path_for_version_info(base_version))
 
     def update_release_local(self):
         for dep in self.dependency_by_variable.values():
@@ -288,10 +330,11 @@ def main():
     )
     cue_shim.find_all_dependencies()
     cue_shim.use_epics_base("R7.0.3.1-2.0.0")
-    cue_shim.update_release_local()
     cue_shim.write_set_to_file("defaults")
+    cue_shim.update_release_local()
     # TODO: slac-epics/epics-base has absolute /afs submodule paths :(
     cue_shim._cue.prepare(CueOptions())
+    cue_shim._cue.build(CueOptions())
 
 
 if __name__ == "__main__":
