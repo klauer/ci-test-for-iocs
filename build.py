@@ -6,6 +6,7 @@ import os
 import pathlib
 import re
 import shutil
+import sys
 from dataclasses import dataclass, field
 from typing import Any, ClassVar, Dict, List, Optional
 
@@ -20,7 +21,7 @@ MODULE_PATH = pathlib.Path(__file__).parent.resolve()
 @dataclass
 class CueOptions:
     no_vcvars: bool = False
-    add_path: List[str] = field(default_factory=list)
+    paths: List[str] = field(default_factory=list)
     timeout: int = 10000
 
 
@@ -60,7 +61,7 @@ class VersionInfo:
             "_REPOOWNER": cue.setup.get("REPOOWNER", "slac-epics"),
             "_VARNAME": variable_name,
             "_RECURSIVE": "YES",
-            "_DEPTH": -1,
+            "_DEPTH": "-1",
         }
         res["_REPOURL"] = "https://github.com/{_REPOOWNER}/{_REPONAME}.git".format(
             **res
@@ -94,24 +95,66 @@ class CueShim:
 
     cache_path: pathlib.Path
     group: DependencyGroup
+    dependency_by_variable: Dict[str, Dependency]
+    version_by_variable: Dict[str, VersionInfo]
+    epics_base_for_introspection: pathlib.Path
+    set_path: pathlib.Path
+    cache_path: pathlib.Path
+    module_cache_path: pathlib.Path
+    set_path: pathlib.Path
 
     def __init__(
         self,
         target_path: pathlib.Path,
         epics_base_for_introspection: pathlib.Path,
+        set_path: pathlib.Path = MODULE_PATH / "cache" / "sets",
         cache_path: pathlib.Path = MODULE_PATH / "cache",
+        local: bool = False,
     ):
         self.cache_path = cache_path
         self.module_cache_path = cache_path / "modules"
-        os.environ["CACHEDIR"] = str(self.module_cache_path)
-        import cue
-        self._cue = cue
-        self._cue.prepare_env()
-        self._cue.detect_context()
         self.dependency_by_variable = {}
         self.version_by_variable = {}
         self.epics_base_for_introspection = epics_base_for_introspection.resolve()
         self.group = self._set_primary_target(target_path)
+        self.set_path = set_path
+        self.local = local
+        self._import_cue()
+
+    def _import_cue(self):
+        """This is ugly, I know.  Treat 'cue.py' as a class of sorts."""
+        import cue  # noqa
+        os.environ["CACHEDIR"] = str(self.module_cache_path)
+        os.environ["SETUP_PATH"] = str(self.set_path)
+        if self.local:
+            # Pretend we're github actions for now
+            os.environ["GITHUB_ACTIONS"] = "1"
+            if sys.platform == "darwin":
+                os.environ["RUNNER_OS"] = "macOS"
+                os.environ["CMP"] = "clang"
+            else:
+                # untested
+                os.environ["RUNNER_OS"] = "Linux"
+                os.environ["CMP"] = "gcc-4.9"
+
+        self._cue = cue
+        self._cue.prepare_env()
+        self._cue.detect_context()
+
+    def create_set_text(self):
+        result = []
+        # TODO: order based on dependency graph
+        for variable, version in reversed(self.version_by_variable.items()):
+            for key, value in version.to_cue(variable).items():
+                result.append(f"{key}={value}")
+        return "\n".join(result)
+
+    def write_set_to_file(self, name: str) -> pathlib.Path:
+        self.set_path.mkdir(parents=True, exist_ok=True)
+        set_filename = self.set_path / f"{name}.set"
+        with open(set_filename, "wt") as fp:
+            print(self.create_set_text(), file=fp)
+        return set_filename
 
     def _set_primary_target(self, path: pathlib.Path) -> DependencyGroup:
         # TODO: RELEASE_SITE may need to be generated if unavailable;
@@ -230,6 +273,7 @@ class CueShim:
 
     def update_release_local(self):
         for dep in self.dependency_by_variable.values():
+            assert dep.variable_name is not None
             version = self.version_by_variable[dep.variable_name]
             dep_path = str(self.get_path_for_version_info(version))
             logger.debug("Updating RELEASE.local: %s=%s", dep.variable_name, dep_path)
@@ -240,12 +284,14 @@ def main():
     cue_shim = CueShim(
         target_path=pathlib.Path("ads-ioc"),
         epics_base_for_introspection=pathlib.Path("/Users/klauer/Repos/epics-base"),
+        local=True,
     )
     cue_shim.find_all_dependencies()
     cue_shim.use_epics_base("R7.0.3.1-2.0.0")
     cue_shim.update_release_local()
+    cue_shim.write_set_to_file("defaults")
     # TODO: slac-epics/epics-base has absolute /afs submodule paths :(
-    # cue_shim._cue.prepare(CueOptions())
+    cue_shim._cue.prepare(CueOptions())
 
 
 if __name__ == "__main__":
