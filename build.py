@@ -171,8 +171,9 @@ class CueShim:
             os.environ["GITHUB_ACTIONS"] = "1"
             if sys.platform == "darwin":
                 os.environ["RUNNER_OS"] = "macOS"
-                os.environ["CMP"] = "clang"
-                # os.environ["CMP"] = "gcc"
+                # os.environ["CMP"] = "clang"
+                # Try homebrew-installed gcc:
+                os.environ["CMP"] = "gcc-12"
             else:
                 # untested
                 os.environ["RUNNER_OS"] = "Linux"
