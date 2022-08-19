@@ -189,6 +189,20 @@ class CueShim:
         self._cue.skip_dep_builds = False
         # Force a recompilation step, no matter what cue says.
         self._cue.do_recompile = True  # TODO
+        self._patch_cue()
+
+    def _patch_cue(self):
+        # 1. Patch `call_git` to insert `--template` in git clone, allowing
+        # us to intercept invalid AFS submodules
+
+        def call_git(args: List[str], **kwargs):
+            if args and args[0] == "clone":
+                git_template_path = MODULE_PATH / "git-template"
+                args.insert(1, f"--template={git_template_path}")
+            return orig_call_git(args, **kwargs)
+
+        orig_call_git = self._cue.call_git
+        self._cue.call_git = call_git
 
     def create_set_text(self):
         result = []
