@@ -5,7 +5,6 @@ import logging
 import os
 import pathlib
 import re
-import shutil
 import sys
 from dataclasses import dataclass, field
 from typing import Any, ClassVar, Dict, List, Optional
@@ -223,9 +222,9 @@ class CueShim:
     def _set_primary_target(self, path: pathlib.Path) -> DependencyGroup:
         # TODO: RELEASE_SITE may need to be generated if unavailable;
         # see eco-tools
-        release_site = path / "RELEASE_SITE"
-        if release_site.exists():
-            shutil.copy(release_site, self.cache_path)
+        # release_site = path / "RELEASE_SITE"
+        # if release_site.exists():
+        #     shutil.copy(release_site, self.cache_path)
         makefile = self.get_makefile_for_path(path)
         return DependencyGroup.from_makefile(makefile)
 
@@ -331,6 +330,19 @@ class CueShim:
             name="epics-base",
             base=tag,
             tag=tag,
+        )
+        with open(self.cache_path / "RELEASE_SITE", "wt") as fp:
+            print("EPICS_SITE_TOP=", file=fp)
+            print(f"BASE_MODULE_VERSION={tag}", file=fp)
+            print("EPICS_MODULES=$(EPICS_SITE_TOP)/modules", file=fp)
+
+        cache_base = self.cache_path / "base"
+        cache_base.mkdir(parents=True, exist_ok=True)
+        os.symlink(
+            # modules/epics-base-... ->
+            self.get_path_for_version_info(base_version),
+            # base/tag/...
+            self.cache_path / "base" / tag
         )
         self.add_dependency("EPICS_BASE", base_version)
 
