@@ -244,11 +244,17 @@ class CueShim:
                 break
 
             last_remaining = set(remaining)
+
         return build_order
 
     def create_set_text(self):
         result = []
-        for variable in self.get_build_order():
+        build_order = self.get_build_order()
+        logger.warning(
+            "Determined build order of modules for use in the .set file: %s",
+            ", ".join(build_order),
+        )
+        for variable in build_order:
             version = self.version_by_variable[variable]
             cue_set_name = cue_set_name_overrides.get(variable, variable)
             for key, value in version.to_cue(cue_set_name).items():
@@ -328,6 +334,10 @@ class CueShim:
 
         return dep
 
+    @property
+    def module_release_local(self) -> pathlib.Path:
+        return self.module_cache_path / "RELEASE.local"
+
     def find_all_dependencies(self):
         """
         Using module path conventions, find all dependencies and check them
@@ -338,6 +348,9 @@ class CueShim:
         :func:`VersionInfo.from_path`
         """
         checked = set()
+
+        # see note below about dependency ordering...
+        self.module_release_local.unlink(missing_ok=True)
 
         def done() -> bool:
             return all(
