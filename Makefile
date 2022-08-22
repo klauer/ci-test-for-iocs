@@ -8,7 +8,7 @@ all: run-ioc
 
 build-ioc: Dockerfile
 	DOCKER_BUILDKIT=$(DOCKER_BUILDKIT) && \
-			docker build --tag $(IMAGE) --file Dockerfile .
+			docker build --tag $(IMAGE) --file Dockerfile --progress=plain .
 
 run-ioc: build-ioc
 	docker run -it $(RUN_ARGS) -v $(PWD)/:/cds/home/username/builder $(IMAGE)

@@ -176,7 +176,8 @@ class CueShim:
             else:
                 # untested
                 os.environ["RUNNER_OS"] = "Linux"
-                os.environ["CMP"] = "gcc-4.9"
+                # os.environ["CMP"] = "gcc-4.9"
+                os.environ["CMP"] = "gcc"
 
         self._cue = cue
         self._cue.setup["REPOOWNER"] = self.github_org
@@ -203,10 +204,52 @@ class CueShim:
         orig_call_git = self._cue.call_git
         self._cue.call_git = call_git
 
+    def get_build_order(self) -> List[str]:
+        """Get the build order by variable name."""
+        # TODO: order based on dependency graph could/should be done efficiently
+        build_order = ["EPICS_BASE"]
+        skip = ["BASE"]
+        remaining = set(self.version_by_variable) - set(build_order) - set(skip)
+        last_remaining = None
+        remaining_requires = {
+            dep: list(self.dependency_by_variable[dep].dependencies)
+            for dep in remaining
+        }
+        while remaining:
+            for to_check_name in list(remaining):
+                dep = self.dependency_by_variable[to_check_name]
+                if all(subdep in build_order for subdep in dep.dependencies):
+                    build_order.append(to_check_name)
+                    remaining.remove(to_check_name)
+            if last_remaining == remaining:
+                remaining_requires = {
+                    dep: list(self.dependency_by_variable[dep].dependencies)
+                    for dep in remaining
+                }
+                logger.warning(
+                    f"Unable to determine build order.  Determined build order:\n"
+                    f"{build_order}\n"
+                    f"\n"
+                    f"Remaining:\n"
+                    f"{remaining}\n"
+                    f"\n"
+                    f"which require:\n"
+                    f"{remaining_requires}"
+                )
+                # TODO: some deps pick up RELEASE.local and show that it
+                # requires _all_ modules that the IOC does; hmm...
+                for remaining_dep in remaining:
+                    print(self.dependency_by_variable[remaining_dep])
+                    build_order.append(remaining_dep)
+                break
+
+            last_remaining = set(remaining)
+        return build_order
+
     def create_set_text(self):
         result = []
-        # TODO: order based on dependency graph
-        for variable, version in reversed(self.version_by_variable.items()):
+        for variable in self.get_build_order():
+            version = self.version_by_variable[variable]
             cue_set_name = cue_set_name_overrides.get(variable, variable)
             for key, value in version.to_cue(cue_set_name).items():
                 result.append(f"{key}={value}")
@@ -239,7 +282,10 @@ class CueShim:
         )
 
     def get_path_for_version_info(self, dep: VersionInfo) -> pathlib.Path:
-        return self.module_cache_path / f"{dep.name}-{dep.tag}"
+        tag = dep.tag
+        if "-branch" in tag:
+            tag = tag.replace("-branch", "")
+        return self.module_cache_path / f"{dep.name}-{tag}"
 
     def update_settings(self, settings: Dict[str, str], overwrite: bool = True):
         for key, value in settings.items():
@@ -331,18 +377,23 @@ class CueShim:
             base=tag,
             tag=tag,
         )
+        cache_base = self.cache_path / "base"
+        cache_base.mkdir(parents=True, exist_ok=True)
+
         with open(self.cache_path / "RELEASE_SITE", "wt") as fp:
             print("EPICS_SITE_TOP=", file=fp)
             print(f"BASE_MODULE_VERSION={tag}", file=fp)
             print("EPICS_MODULES=$(EPICS_SITE_TOP)/modules", file=fp)
 
-        cache_base = self.cache_path / "base"
-        cache_base.mkdir(parents=True, exist_ok=True)
+        tagged_base_path = self.cache_path / "base" / tag
+        if tagged_base_path.exists() and tagged_base_path.is_symlink():
+            tagged_base_path.unlink()
+
         os.symlink(
             # modules/epics-base-... ->
             self.get_path_for_version_info(base_version),
             # base/tag/...
-            self.cache_path / "base" / tag
+            tagged_base_path
         )
         self.add_dependency("EPICS_BASE", base_version)
 
@@ -355,14 +406,24 @@ class CueShim:
             self._cue.update_release_local(dep.variable_name, dep_path)
 
 
-def main():
+def main(ioc_path: str):
+    introspection_base = pathlib.Path("/cds/group/pcds/epics/base/R7.0.2-2.0/")
+    local_base = pathlib.Path("/Users/klauer/Repos/epics-base")
+    if local_base.exists():
+        introspection_base = local_base
+
     cue_shim = CueShim(
-        target_path=pathlib.Path("ads-ioc"),
-        epics_base_for_introspection=pathlib.Path("/Users/klauer/Repos/epics-base"),
+        target_path=pathlib.Path(ioc_path).resolve(),
+        epics_base_for_introspection=introspection_base,
         local=True,
     )
+    # NOTE/TODO: use the 7.0.3.1-2.0 *branch* for noW:
+    # R7.0.3.1-2.0 is a branch, whereas R7.0.3.1-2.0.1 is a tag;
+    cue_shim.use_epics_base("R7.0.2-2.branch")
+    # /cds/group/pcds/epics/base/R7.0.3.1-2.0 is where all minor local fixes
+    # go for 7.0.3.1-2.0.
+    # cue_shim.use_epics_base("R7.0.3.1-2.0-branch")
     cue_shim.find_all_dependencies()
-    cue_shim.use_epics_base("R7.0.3.1-2.0.0")
     cue_shim.write_set_to_file("defaults")
     cue_shim.update_release_local()
     # TODO: slac-epics/epics-base has absolute /afs submodule paths :(
@@ -373,4 +434,4 @@ def main():
 if __name__ == "__main__":
     logging.basicConfig(level="WARNING")
     logger.setLevel("DEBUG")
-    main()
+    main(ioc_path=sys.argv[1])

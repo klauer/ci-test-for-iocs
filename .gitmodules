@@ -1,3 +1,6 @@
 [submodule ".ci"]
 	path = .ci
 	url = https://github.com/epics-base/ci-scripts
+[submodule "support/whatrecord"]
+	path = support/whatrecord
+	url = https://github.com/klauer/whatrecord
