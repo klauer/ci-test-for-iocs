@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import contextlib
+import dataclasses
 import logging
 import os
 import pathlib
@@ -32,6 +33,19 @@ repo_name_overrides = {
 cue_set_name_overrides = {
     "EPICS_BASE": "BASE",
 }
+
+
+@dataclass
+class PcdsBuildPaths:
+    epics_base: pathlib.Path
+    epics_site_top: pathlib.Path
+    epics_modules: pathlib.Path
+
+    def to_variables(self) -> Dict[str, str]:
+        return {
+            var.upper(): str(value.resolve())
+            for var, value in dataclasses.asdict(self).items()
+        }
 
 
 @dataclass
@@ -126,7 +140,7 @@ class CueShim:
     dependency_by_variable: Dict[str, Dependency]
     #: epics-base to use in the initial setup stage with whatrecord, required
     #: for the GNU make-based build system
-    epics_base_for_introspection: pathlib.Path
+    introspection_paths: PcdsBuildPaths
     #: The top-level whatrecord dependency group which gets updated as we
     #: check out more dependencies.
     group: DependencyGroup
@@ -144,7 +158,7 @@ class CueShim:
     def __init__(
         self,
         target_path: pathlib.Path,
-        epics_base_for_introspection: pathlib.Path,
+        introspection_paths: PcdsBuildPaths,
         set_path: pathlib.Path = MODULE_PATH / "cache" / "sets",
         cache_path: pathlib.Path = MODULE_PATH / "cache",
         local: bool = False,
@@ -154,7 +168,7 @@ class CueShim:
         self.module_cache_path = cache_path / "modules"
         self.dependency_by_variable = {}
         self.version_by_variable = {}
-        self.epics_base_for_introspection = epics_base_for_introspection.resolve()
+        self.introspection_paths = introspection_paths
         self.group = self._set_primary_target(target_path)
         self.set_path = set_path
         self.local = local
@@ -209,15 +223,23 @@ class CueShim:
         """Get the build order by variable name."""
         # TODO: order based on dependency graph could/should be done efficiently
         build_order = ["EPICS_BASE"]
-        skip = ["BASE"]
+        skip = []
         remaining = set(self.version_by_variable) - set(build_order) - set(skip)
         last_remaining = None
         remaining_requires = {
-            dep: list(self.dependency_by_variable[dep].dependencies)
+            dep: list(
+                var
+                for var in self.dependency_by_variable[dep].dependencies
+                if var != dep
+            )
             for dep in remaining
         }
+        logger.debug(
+            "Trying to determine build order based on these requirements: %s",
+            remaining_requires
+        )
         while remaining:
-            for to_check_name in list(remaining):
+            for to_check_name in sorted(remaining):
                 dep = self.dependency_by_variable[to_check_name]
                 if all(subdep in build_order for subdep in dep.dependencies):
                     build_order.append(to_check_name)
@@ -243,11 +265,12 @@ class CueShim:
 
             last_remaining = set(remaining)
 
-        return build_order
+        # EPICS_BASE is implicit: added in cue.modlist() automatically
+        return build_order[1:]
 
     def create_set_text(self):
         result = []
-        for variable in self.get_build_order():
+        for variable in ["EPICS_BASE"] + self.get_build_order():
             version = self.version_by_variable[variable]
             cue_set_name = cue_set_name_overrides.get(variable, variable)
             for key, value in version.to_cue(cue_set_name).items():
@@ -277,7 +300,7 @@ class CueShim:
             # NOTE: may need to specify an existing epics-base to get the build
             # system makefiles.  Alternatively, a barebones version could be
             # packaged to do so?
-            variables=dict(EPICS_BASE=str(self.epics_base_for_introspection)),
+            variables=self.introspection_paths.to_variables(),
         )
 
     def get_path_for_version_info(self, dep: VersionInfo) -> pathlib.Path:
@@ -301,19 +324,20 @@ class CueShim:
                 logger.debug("cue setup %s=%r", key, value)
                 self._cue.setup[key] = value
 
+    def git_reset_repo_directory(self, variable_name: str, directory: str):
+        version = self.version_by_variable[variable_name]
+        module_path = self.get_path_for_version_info(version)
+        self._cue.call_git(["checkout", "--", directory], cwd=str(module_path))
+
     def add_dependency(self, variable_name: str, version: VersionInfo) -> Dependency:
+        cue_variable_name = cue_set_name_overrides.get(variable_name, variable_name)
         logger.info("Updating cue settings for dependency %s: %s", variable_name, version)
-        self.update_settings(version.to_cue(variable_name), overwrite=True)
+        self.update_settings(version.to_cue(cue_variable_name), overwrite=True)
         self.version_by_variable[variable_name] = version
 
-        def no_op(*args, **kwargs):
-            ...
+        self._cue.add_dependency(cue_variable_name)
 
-        # Tell cue to clone it, but make sure we keep our RELEASE settings
-        # as-is
-        with monkeypatch(self._cue, "update_release_local", no_op):
-            self._cue.add_dependency(variable_name)
-
+        self.git_reset_repo_directory(variable_name, "configure")
         cache_path = self.get_path_for_version_info(version)
         makefile = self.get_makefile_for_path(cache_path)
         dep = Dependency.from_makefile(
@@ -358,9 +382,20 @@ class CueShim:
                     continue
                 checked.add(dep.variable_name)
 
+                logger.debug(
+                    "Checking module for dependencies: %s. "
+                    "Existing dependencies: %s Missing paths: %s",
+                    dep.variable_name,
+                    ", ".join(f"{var}={value}" for var, value in dep.dependencies.items()),
+                    ", ".join(f"{var}={value}" for var, value in dep.missing_paths.items()),
+                )
+
                 for var, path in dep.missing_paths.items():
                     if var in checked:
-                        if var not in self.dependency_by_variable:
+                        version = self.version_by_variable.get(var, None)
+                        if version is not None:
+                            dep.dependencies[var] = self.get_path_for_version_info(version)
+                        else:
                             logger.warning("Dependency still missing; %s", var)
                         continue
 
@@ -372,6 +407,13 @@ class CueShim:
                         continue
 
                     self.add_dependency(var, version_info)
+                    dep.dependencies[var] = self.get_path_for_version_info(version_info)
+                    logger.info(
+                        "Set dependency of %s: %s=%s",
+                        dep.variable_name or "the IOC",
+                        var,
+                        dep.dependencies[var],
+                    )
 
     def use_epics_base(self, tag: str):
         # "building base" means that the ci script is used _just_ for epics-base
@@ -413,7 +455,7 @@ class CueShim:
 
     def update_build_order(self) -> List[str]:
         build_order = self.get_build_order()
-        logger.warning(
+        logger.debug(
             "Determined build order of modules for cue: %s",
             ", ".join(build_order),
         )
@@ -425,14 +467,18 @@ class CueShim:
 
 
 def main(ioc_path: str):
-    introspection_base = pathlib.Path("/cds/group/pcds/epics/base/R7.0.2-2.0/")
-    local_base = pathlib.Path("/Users/klauer/Repos/epics-base")
-    if local_base.exists():
-        introspection_base = local_base
+    # local_base = pathlib.Path("/Users/klauer/Repos/epics-base")
+    # if local_base.exists():
+    #     introspection_base = local_base
 
     cue_shim = CueShim(
         target_path=pathlib.Path(ioc_path).resolve(),
-        epics_base_for_introspection=introspection_base,
+        # For introspection
+        introspection_paths=PcdsBuildPaths(
+            epics_base=pathlib.Path("/cds/group/pcds/epics/base/R7.0.2-2.0/"),
+            epics_site_top=pathlib.Path("/cds/group/pcds/epics/"),
+            epics_modules=pathlib.Path("/cds/group/pcds/epics/R7.0.2-2.0/modules"),
+        ),
         local=True,
     )
     # NOTE/TODO: use the 7.0.3.1-2.0 *branch* for noW:

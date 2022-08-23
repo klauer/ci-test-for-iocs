@@ -21,4 +21,7 @@ COPY --chown=username build.py ./
 COPY --chown=username .ci/cue.py ./
 COPY --chown=username git-template/ ./git-template
 
+RUN echo 'python3 -m whatrecord deps . -d EPICS_BASE=$EPICS_BASE EPICS_MODULES=$EPICS_MODULES EPICS_SITE_TOP=$EPICS_SITE_TOP' >> ~/.bash_history
+RUN echo './build.py ../ads-ioc' >> ~/.bash_history
+
 ENTRYPOINT ["/bin/bash", "--login", "-c"]
