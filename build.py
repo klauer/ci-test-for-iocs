@@ -236,10 +236,7 @@ class CueShim:
                     f"which require:\n"
                     f"{remaining_requires}"
                 )
-                # TODO: some deps pick up RELEASE.local and show that it
-                # requires _all_ modules that the IOC does; hmm...
                 for remaining_dep in remaining:
-                    print(self.dependency_by_variable[remaining_dep])
                     build_order.append(remaining_dep)
                 break
 
@@ -249,12 +246,7 @@ class CueShim:
 
     def create_set_text(self):
         result = []
-        build_order = self.get_build_order()
-        logger.warning(
-            "Determined build order of modules for use in the .set file: %s",
-            ", ".join(build_order),
-        )
-        for variable in build_order:
+        for variable in self.get_build_order():
             version = self.version_by_variable[variable]
             cue_set_name = cue_set_name_overrides.get(variable, variable)
             for key, value in version.to_cue(cue_set_name).items():
@@ -418,6 +410,18 @@ class CueShim:
             logger.debug("Updating RELEASE.local: %s=%s", dep.variable_name, dep_path)
             self._cue.update_release_local(dep.variable_name, dep_path)
 
+    def update_build_order(self) -> List[str]:
+        build_order = self.get_build_order()
+        logger.warning(
+            "Determined build order of modules for cue: %s",
+            ", ".join(build_order),
+        )
+        self._cue.modules_to_compile[:] = [
+            cue_set_name_overrides.get(variable, variable)
+            for variable in build_order
+        ]
+        return build_order
+
 
 def main(ioc_path: str):
     introspection_base = pathlib.Path("/cds/group/pcds/epics/base/R7.0.2-2.0/")
@@ -439,6 +443,7 @@ def main(ioc_path: str):
     cue_shim.find_all_dependencies()
     cue_shim.write_set_to_file("defaults")
     cue_shim.update_release_local()
+    cue_shim.update_build_order()
     # TODO: slac-epics/epics-base has absolute /afs submodule paths :(
     cue_shim._cue.prepare(CueOptions())
     cue_shim._cue.build(CueOptions())
