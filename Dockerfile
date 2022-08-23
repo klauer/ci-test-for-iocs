@@ -21,4 +21,4 @@ COPY --chown=username build.py ./
 COPY --chown=username .ci/cue.py ./
 COPY --chown=username git-template/ ./git-template
 
-# RUN python3 build.py ../ads-ioc
+ENTRYPOINT ["/bin/bash", "-c"]
