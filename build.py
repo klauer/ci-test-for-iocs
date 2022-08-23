@@ -449,9 +449,61 @@ class CueShim:
         for dep in self.dependency_by_variable.values():
             assert dep.variable_name is not None
             version = self.version_by_variable[dep.variable_name]
-            dep_path = str(self.get_path_for_version_info(version))
+            dep_path = self.get_path_for_version_info(version)
             logger.debug("Updating RELEASE.local: %s=%s", dep.variable_name, dep_path)
-            self._cue.update_release_local(dep.variable_name, dep_path)
+            self._cue.update_release_local(dep.variable_name, str(dep_path))
+
+            if dep in ("EPICS_BASE", "BASE"):  # argh, why can't I remember which
+                continue
+
+            for makefile_relative in dep.makefile.makefile_list:
+                makefile = (dep_path / makefile_relative).resolve()
+                try:
+                    makefile.relative_to(dep_path)
+                except ValueError:
+                    logger.warning(
+                        "Skipping makefile: %s (not relative to %s)", makefile, dep_path
+                    )
+                else:
+                    try:
+                        self.patch_makefile(dep, makefile)
+                    except PermissionError:
+                        logger.error("Failed to patch makefile due to permissions: %s", makefile)
+                    except Exception:
+                        logger.exception("Failed to patch makefile: %s", makefile)
+
+    def patch_makefile(self, dep: str, makefile: pathlib.Path):
+        to_update = {
+            var: self.get_path_for_version_info(version)
+            for var, version in self.version_by_variable.items()
+        }
+
+        def fix_line(line: str) -> str:
+            if not line:
+                return line
+            if line[0] in " \t#":
+                return line
+
+            if "=" in line:
+                line = line.rstrip()
+                var, _ = line.split("=", 1)
+                var = var.strip()
+                if var in to_update:
+                    fixed = f"{var}={to_update[var]}"
+                    logger.debug("Fixed %s Makefile line: %s", dep, fixed)
+                    return fixed
+            return line
+
+        with open(makefile, "rt") as fp:
+            lines = fp.read().splitlines()
+
+        output_lines = [fix_line(line) for line in lines]
+        if lines != output_lines:
+            logger.warning("Patching makefile: %s", makefile)
+            with open(makefile, "wt") as fp:
+                print("\n".join(output_lines), file=fp)
+        else:
+            logger.debug("Makefile left unchanged: %s", makefile)
 
     def update_build_order(self) -> List[str]:
         build_order = self.get_build_order()
