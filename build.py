@@ -226,6 +226,10 @@ class CueShim:
         import cue  # noqa
         os.environ["CACHEDIR"] = str(self.module_cache_path)
         os.environ["SETUP_PATH"] = str(self.set_path)
+        # TODO: deps should be cleaned normally
+        os.environ["CLEAN_DEPS"] = "no"
+        # TODO: some of our modules are not parallel-friendly
+        os.environ["PARALLEL_MAKE"] = "0"
         if self.local:
             # Pretend we're github actions for now
             os.environ["GITHUB_ACTIONS"] = "1"
