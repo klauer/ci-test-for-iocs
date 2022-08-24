@@ -549,7 +549,7 @@ class CueShim:
                 logger.debug(
                     "Checking module for dependencies: %s. "
                     "Existing dependencies: %s Missing paths: %s",
-                    dep.variable_name,
+                    dep.variable_name or "this IOC",
                     ", ".join(f"{var}={value}" for var, value in dep.dependencies.items()),
                     ", ".join(f"{var}={value}" for var, value in dep.missing_paths.items()),
                 )
@@ -579,7 +579,7 @@ class CueShim:
                         dep.dependencies[var],
                     )
 
-    def use_epics_base(self, tag: str):
+    def use_epics_base(self, tag: str, build: bool = True):
         """
         Add EPICS_BASE as a dependency given the provided tag.
 
@@ -587,6 +587,8 @@ class CueShim:
         ----------
         tag : str
             The epics-base tag to use.
+        build : bool, optional
+            Build epics-base now.  Defaults to False.
         """
         # "building base" means that the ci script is used _just_ for epics-base
         # and is located in the current working directory (".").  Don't set it
@@ -600,22 +602,28 @@ class CueShim:
         cache_base = self.cache_path / "base"
         cache_base.mkdir(parents=True, exist_ok=True)
 
-        with open(self.cache_path / "RELEASE_SITE", "wt") as fp:
-            print("EPICS_SITE_TOP=", file=fp)
-            print(f"BASE_MODULE_VERSION={tag}", file=fp)
-            print("EPICS_MODULES=$(EPICS_SITE_TOP)/modules", file=fp)
+        # with open(self.cache_path / "RELEASE_SITE", "wt") as fp:
+        #     print(f"EPICS_SITE_TOP={cache_base}", file=fp)
+        #     print(f"BASE_MODULE_VERSION={tag}", file=fp)
+        #     print("EPICS_MODULES=$(EPICS_SITE_TOP)/modules", file=fp)
 
-        tagged_base_path = self.cache_path / "base" / tag
-        if tagged_base_path.exists() and tagged_base_path.is_symlink():
-            tagged_base_path.unlink()
+        # tagged_base_path = self.cache_path / "base" / tag
+        # if tagged_base_path.exists() and tagged_base_path.is_symlink():
+        #     tagged_base_path.unlink()
 
-        os.symlink(
-            # modules/epics-base-... ->
-            self.get_path_for_version_info(base_version),
-            # base/tag/...
-            tagged_base_path
-        )
+        # os.symlink(
+        #     # modules/epics-base-... ->
+        #     self.get_path_for_version_info(base_version),
+        #     # base/tag/...
+        #     tagged_base_path
+        # )
         self.add_dependency("EPICS_BASE", base_version)
+        if build:
+            cache_path = self.get_path_for_version_info(base_version)
+            # TODO
+            self._cue.places["EPICS_BASE"] = str(cache_path)
+            self._cue.setup_for_build(CueOptions())
+            self._cue.call_make(cwd=str(cache_path), parallel=4, silent=True)
 
     def update_makefiles(self):
         """
@@ -685,7 +693,7 @@ class CueShim:
 
 
 def main(ioc_path: str):
-    local_base = pathlib.Path("/Users/klauer/Repos/epics-base")
+    local_base = (MODULE_PATH / "epics-base").resolve()
     if not local_base.exists():
         introspection_paths = PcdsBuildPaths(
             epics_base=pathlib.Path("/cds/group/pcds/epics/base/R7.0.2-2.0/"),
@@ -701,18 +709,21 @@ def main(ioc_path: str):
 
     cue_shim = CueShim(
         target_path=pathlib.Path(ioc_path).resolve(),
-        # For introspection
         introspection_paths=introspection_paths,
         local=True,
     )
     # NOTE/TODO: use the 7.0.3.1-2.0 *branch* for noW:
     # R7.0.3.1-2.0 is a branch, whereas R7.0.3.1-2.0.1 is a tag;
     cue_shim.use_epics_base("R7.0.2-2.branch")
+    cue_shim.introspection_paths.epics_base = cue_shim.get_path_for_version_info(
+        cue_shim.variable_to_version["EPICS_BASE"]
+    )
     # /cds/group/pcds/epics/base/R7.0.3.1-2.0 is where all minor local fixes
     # go for 7.0.3.1-2.0.
     # cue_shim.use_epics_base("R7.0.3.1-2.0-branch")
     cue_shim.find_all_dependencies()
     cue_shim.write_set_to_file("defaults")
+    return
     cue_shim.update_makefiles()
     cue_shim.update_build_order()
     # TODO: slac-epics/epics-base has absolute /afs submodule paths :(
