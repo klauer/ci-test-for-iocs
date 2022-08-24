@@ -642,11 +642,22 @@ class CueShim:
                     continue
 
                 try:
-                    patch_makefile(makefile, self.dependency_to_path)
+                    patch_makefile(makefile, self.makefile_variables_to_patch)
                 except PermissionError:
                     logger.error("Failed to patch makefile due to permissions: %s", makefile)
                 except Exception:
                     logger.exception("Failed to patch makefile: %s", makefile)
+
+    @property
+    def makefile_variables_to_patch(self) -> Dict[str, str]:
+        """Variables to patch in module makefiles."""
+        to_patch = {
+            variable: str(path)
+            for variable, path in self.dependency_to_path.items()
+        }
+        # Use EPEL re2c for now instead of the pspkg one:
+        to_patch["RE2C"] = "re2c"
+        return to_patch
 
     @property
     def dependency_to_path(self) -> Dict[str, pathlib.Path]:
