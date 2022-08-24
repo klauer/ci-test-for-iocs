@@ -327,8 +327,7 @@ class CueShim:
 
             last_remaining = set(remaining)
 
-        # EPICS_BASE is implicit: added in cue.modlist() automatically
-        return build_order[1:]
+        return build_order
 
     def create_set_text(self) -> str:
         """
@@ -640,7 +639,7 @@ class CueShim:
                 try:
                     makefile.relative_to(dep_path)
                 except ValueError:
-                    logger.warning(
+                    logger.debug(
                         "Skipping makefile: %s (not relative to %s)", makefile, dep_path
                     )
                     continue
