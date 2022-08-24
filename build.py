@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
-import contextlib
 import dataclasses
 import logging
 import os
@@ -9,7 +8,7 @@ import pathlib
 import re
 import sys
 from dataclasses import dataclass, field
-from typing import Any, ClassVar, Dict, List, Optional
+from typing import Any, ClassVar, Dict, List, Optional, Set
 
 import cue
 from whatrecord.makefile import Dependency, DependencyGroup, Makefile
@@ -37,11 +36,22 @@ cue_set_name_overrides = {
 
 @dataclass
 class PcdsBuildPaths:
+    #: Path to epics-base.
     epics_base: pathlib.Path
+    #: Path to where epics-base and modules are contained.
     epics_site_top: pathlib.Path
+    #: Path to where this specific epics-base has its modules.
     epics_modules: pathlib.Path
 
     def to_variables(self) -> Dict[str, str]:
+        """
+        Generate a dictionary of variable-to-string-value.
+
+        Returns
+        -------
+        Dict[str, str]
+            ```{"EPICS_BASE": "/path/to/epics-base/", ...}```
+        """
         return {
             var.upper(): str(value.resolve())
             for var, value in dataclasses.asdict(self).items()
@@ -113,19 +123,55 @@ class VersionInfo:
         }
 
 
-@contextlib.contextmanager
-def monkeypatch(obj: object, attr: str, value: Any) -> Any:
-    sentinel = object()
+def patch_makefile(makefile: pathlib.Path, variables: Dict[str, Any]) -> Set[str]:
+    """
+    Patch Makefile variable declarations with those provided in ``variables``.
 
-    old_value = getattr(obj, attr, sentinel)
-    try:
-        setattr(obj, attr, value)
-        yield old_value
-    finally:
-        if old_value is not sentinel:
-            setattr(obj, attr, old_value)
-        else:
-            delattr(obj, attr)
+    Parameters
+    ----------
+    makefile : pathlib.Path
+        Path to the Makefile.
+    variables : Dict[str, Any]
+        Variable-to-value dictionary.
+
+    Returns
+    -------
+    Set[str]
+        Set of updated variables.
+    """
+    updated = set()
+
+    def fix_line(line: str) -> str:
+        if not line:
+            return line
+        if line[0] in " \t#":
+            return line
+
+        for separator in ("?=", ":=", "="):
+            if separator in line:
+                line = line.rstrip()
+                var, _ = line.split(separator, 1)
+                var = var.strip()
+                if var in variables:
+                    fixed = f"{var}{separator}{variables[var]}"
+                    updated.add(var)
+                    return fixed
+
+        return line
+
+    with open(makefile, "rt") as fp:
+        lines = fp.read().splitlines()
+
+    output_lines = [fix_line(line) for line in lines]
+    if updated:
+        logger.warning(
+            "Patching makefile %s variables %s", makefile, ", ".join(updated)
+        )
+        with open(makefile, "wt") as fp:
+            print("\n".join(output_lines), file=fp)
+    else:
+        logger.debug("Makefile left unchanged: %s", makefile)
+    return updated
 
 
 class CueShim:
@@ -137,7 +183,7 @@ class CueShim:
     #: Cache path where all dependencies go.
     cache_path: pathlib.Path
     #: whatrecord dependency information keyed by build variable name.
-    dependency_by_variable: Dict[str, Dependency]
+    variable_to_dependency: Dict[str, Dependency]
     #: epics-base to use in the initial setup stage with whatrecord, required
     #: for the GNU make-based build system
     introspection_paths: PcdsBuildPaths
@@ -153,7 +199,7 @@ class CueShim:
     set_path: pathlib.Path
     #: Version information by variable name, derived from whatrecord-provided
     #: makefile introspection.
-    version_by_variable: Dict[str, VersionInfo]
+    variable_to_version: Dict[str, VersionInfo]
 
     def __init__(
         self,
@@ -166,8 +212,8 @@ class CueShim:
     ):
         self.cache_path = cache_path
         self.module_cache_path = cache_path / "modules"
-        self.dependency_by_variable = {}
-        self.version_by_variable = {}
+        self.variable_to_dependency = {}
+        self.variable_to_version = {}
         self.introspection_paths = introspection_paths
         self.group = self._set_primary_target(target_path)
         self.set_path = set_path
@@ -206,9 +252,13 @@ class CueShim:
         self._cue.do_recompile = True  # TODO
         self._patch_cue()
 
-    def _patch_cue(self):
-        # 1. Patch `call_git` to insert `--template` in git clone, allowing
-        # us to intercept invalid AFS submodules
+    def _patch_cue(self) -> None:
+        """
+        Monkeypatch cue to do what we expect:
+
+        *. Patch `call_git` to insert `--template` in git clone, allowing
+            us to intercept invalid AFS submodules
+        """
 
         def call_git(args: List[str], **kwargs):
             if args and args[0] == "clone":
@@ -220,16 +270,24 @@ class CueShim:
         self._cue.call_git = call_git
 
     def get_build_order(self) -> List[str]:
-        """Get the build order by variable name."""
+        """
+        Get the build order by variable name.
+
+        Returns
+        -------
+        list of str
+            List of Makefile-defined variable names, in order of how they
+            should be built.
+        """
         # TODO: order based on dependency graph could/should be done efficiently
         build_order = ["EPICS_BASE"]
         skip = []
-        remaining = set(self.version_by_variable) - set(build_order) - set(skip)
+        remaining = set(self.variable_to_version) - set(build_order) - set(skip)
         last_remaining = None
         remaining_requires = {
             dep: list(
                 var
-                for var in self.dependency_by_variable[dep].dependencies
+                for var in self.variable_to_dependency[dep].dependencies
                 if var != dep
             )
             for dep in remaining
@@ -240,13 +298,13 @@ class CueShim:
         )
         while remaining:
             for to_check_name in sorted(remaining):
-                dep = self.dependency_by_variable[to_check_name]
+                dep = self.variable_to_dependency[to_check_name]
                 if all(subdep in build_order for subdep in dep.dependencies):
                     build_order.append(to_check_name)
                     remaining.remove(to_check_name)
             if last_remaining == remaining:
                 remaining_requires = {
-                    dep: list(self.dependency_by_variable[dep].dependencies)
+                    dep: list(self.variable_to_dependency[dep].dependencies)
                     for dep in remaining
                 }
                 logger.warning(
@@ -268,16 +326,37 @@ class CueShim:
         # EPICS_BASE is implicit: added in cue.modlist() automatically
         return build_order[1:]
 
-    def create_set_text(self):
+    def create_set_text(self) -> str:
+        """
+        Generate the .set file contents based on the configured versions.
+
+        Returns
+        -------
+        str
+            The .set file contents.
+        """
         result = []
         for variable in ["EPICS_BASE"] + self.get_build_order():
-            version = self.version_by_variable[variable]
+            version = self.variable_to_version[variable]
             cue_set_name = cue_set_name_overrides.get(variable, variable)
             for key, value in version.to_cue(cue_set_name).items():
                 result.append(f"{key}={value}")
         return "\n".join(result)
 
     def write_set_to_file(self, name: str) -> pathlib.Path:
+        """
+        Write a cue .set file to the setup directory.
+
+        Parameters
+        ----------
+        name : str
+            The name of the .set file to write.
+
+        Returns
+        -------
+        pathlib.Path
+            The path to the file that was written.
+        """
         self.set_path.mkdir(parents=True, exist_ok=True)
         set_filename = self.set_path / f"{name}.set"
         with open(set_filename, "wt") as fp:
@@ -285,6 +364,20 @@ class CueShim:
         return set_filename
 
     def _set_primary_target(self, path: pathlib.Path) -> DependencyGroup:
+        """
+        Set the primary target - IOC or module - path.
+
+        Parameters
+        ----------
+        path : pathlib.Path
+            Path to the primary target.
+
+        Returns
+        -------
+        DependencyGroup
+            The top-level `DependencyGroup` which is what whatrecord uses
+            to track dependencies.
+        """
         # TODO: RELEASE_SITE may need to be generated if unavailable;
         # see eco-tools
         # release_site = path / "RELEASE_SITE"
@@ -294,6 +387,19 @@ class CueShim:
         return DependencyGroup.from_makefile(makefile)
 
     def get_makefile_for_path(self, path: pathlib.Path) -> Makefile:
+        """
+        Get a whatrecord :class:`Makefile` for the provided path.
+
+        Parameters
+        ----------
+        path : pathlib.Path
+            The path to search for a Makefile, or a path to the makefile
+            itself.
+
+        Returns
+        -------
+        Makefile
+        """
         return Makefile.from_file(
             Makefile.find_makefile(path),
             keep_os_env=False,
@@ -304,12 +410,37 @@ class CueShim:
         )
 
     def get_path_for_version_info(self, dep: VersionInfo) -> pathlib.Path:
+        """
+        Get the cache path for the provided dependency with version
+        information.
+
+        Parameters
+        ----------
+        dep : VersionInfo
+            The version information for the dependency, either derived by way
+            of introspection or manually.
+
+        Returns
+        -------
+        pathlib.Path
+
+        """
         tag = dep.tag
         if "-branch" in tag:
             tag = tag.replace("-branch", "")
         return self.module_cache_path / f"{dep.name}-{tag}"
 
     def update_settings(self, settings: Dict[str, str], overwrite: bool = True):
+        """
+        Update cue's settings dictionary verbosely.
+
+        Parameters
+        ----------
+        settings : Dict[str, str]
+            Settings to update, key to value.
+        overwrite : bool, optional
+            Overwrite existing settings.  Defaults to True.
+        """
         for key, value in settings.items():
             old_value = self._cue.setup.get(key, None)
             if old_value == value:
@@ -325,15 +456,42 @@ class CueShim:
                 self._cue.setup[key] = value
 
     def git_reset_repo_directory(self, variable_name: str, directory: str):
-        version = self.version_by_variable[variable_name]
+        """
+        Run git reset (or git checkout --) on a specific subdirectory
+        of a dependency.
+
+        Parameters
+        ----------
+        variable_name : str
+            The dependency's variable name (as defined in makefiles).
+        directory : str
+            The subdirectory of that dependency.
+        """
+        version = self.variable_to_version[variable_name]
         module_path = self.get_path_for_version_info(version)
         self._cue.call_git(["checkout", "--", directory], cwd=str(module_path))
 
     def add_dependency(self, variable_name: str, version: VersionInfo) -> Dependency:
+        """
+        Add a dependency identified by its variable name and version tag.
+
+        Parameters
+        ----------
+        variable_name : str
+            The Makefile-defined variable for the dependency.
+        version : VersionInfo
+            The version information for the dependency, either derived by way
+            of introspection or manually.
+
+        Returns
+        -------
+        Dependency
+            The whatrecord-generated :class:`Dependency`.
+        """
         cue_variable_name = cue_set_name_overrides.get(variable_name, variable_name)
         logger.info("Updating cue settings for dependency %s: %s", variable_name, version)
         self.update_settings(version.to_cue(cue_variable_name), overwrite=True)
-        self.version_by_variable[variable_name] = version
+        self.variable_to_version[variable_name] = version
 
         self._cue.add_dependency(cue_variable_name)
 
@@ -347,12 +505,15 @@ class CueShim:
             variable_name=variable_name,
             root=self.group,
         )
-        self.dependency_by_variable[variable_name] = dep
+        self.variable_to_dependency[variable_name] = dep
 
         return dep
 
     @property
     def module_release_local(self) -> pathlib.Path:
+        """
+        The RELEASE.local file containing all dependencies, generated by cue.
+        """
         return self.module_cache_path / "RELEASE.local"
 
     def find_all_dependencies(self):
@@ -392,7 +553,7 @@ class CueShim:
 
                 for var, path in dep.missing_paths.items():
                     if var in checked:
-                        version = self.version_by_variable.get(var, None)
+                        version = self.variable_to_version.get(var, None)
                         if version is not None:
                             dep.dependencies[var] = self.get_path_for_version_info(version)
                         else:
@@ -416,6 +577,14 @@ class CueShim:
                     )
 
     def use_epics_base(self, tag: str):
+        """
+        Add EPICS_BASE as a dependency given the provided tag.
+
+        Parameters
+        ----------
+        tag : str
+            The epics-base tag to use.
+        """
         # "building base" means that the ci script is used _just_ for epics-base
         # and is located in the current working directory (".").  Don't set it
         # for our modules/IOCs.
@@ -445,10 +614,16 @@ class CueShim:
         )
         self.add_dependency("EPICS_BASE", base_version)
 
-    def update_release_local(self):
-        for dep in self.dependency_by_variable.values():
+    def update_makefiles(self):
+        """
+        Updates all makefiles with appropriate paths.
+
+        * RELEASE.local from epics-ci cue
+        * Dependency makefiles found during the introspection stage
+        """
+        for dep in self.variable_to_dependency.values():
             assert dep.variable_name is not None
-            version = self.version_by_variable[dep.variable_name]
+            version = self.variable_to_version[dep.variable_name]
             dep_path = self.get_path_for_version_info(version)
             logger.debug("Updating RELEASE.local: %s=%s", dep.variable_name, dep_path)
             self._cue.update_release_local(dep.variable_name, str(dep_path))
@@ -464,48 +639,25 @@ class CueShim:
                     logger.warning(
                         "Skipping makefile: %s (not relative to %s)", makefile, dep_path
                     )
-                else:
-                    try:
-                        self.patch_makefile(dep, makefile)
-                    except PermissionError:
-                        logger.error("Failed to patch makefile due to permissions: %s", makefile)
-                    except Exception:
-                        logger.exception("Failed to patch makefile: %s", makefile)
+                    continue
 
-    def patch_makefile(self, dep: str, makefile: pathlib.Path):
-        to_update = {
+                try:
+                    patch_makefile(makefile, self.dependency_to_path)
+                except PermissionError:
+                    logger.error("Failed to patch makefile due to permissions: %s", makefile)
+                except Exception:
+                    logger.exception("Failed to patch makefile: %s", makefile)
+
+    @property
+    def dependency_to_path(self) -> Dict[str, pathlib.Path]:
+        """Dependency variable name to cache path."""
+        return {
             var: self.get_path_for_version_info(version)
-            for var, version in self.version_by_variable.items()
+            for var, version in self.variable_to_version.items()
         }
 
-        def fix_line(line: str) -> str:
-            if not line:
-                return line
-            if line[0] in " \t#":
-                return line
-
-            if "=" in line:
-                line = line.rstrip()
-                var, _ = line.split("=", 1)
-                var = var.strip()
-                if var in to_update:
-                    fixed = f"{var}={to_update[var]}"
-                    logger.debug("Fixed %s Makefile line: %s", dep, fixed)
-                    return fixed
-            return line
-
-        with open(makefile, "rt") as fp:
-            lines = fp.read().splitlines()
-
-        output_lines = [fix_line(line) for line in lines]
-        if lines != output_lines:
-            logger.warning("Patching makefile: %s", makefile)
-            with open(makefile, "wt") as fp:
-                print("\n".join(output_lines), file=fp)
-        else:
-            logger.debug("Makefile left unchanged: %s", makefile)
-
     def update_build_order(self) -> List[str]:
+        """Update cue's build order of the modules to compile."""
         build_order = self.get_build_order()
         logger.debug(
             "Determined build order of modules for cue: %s",
@@ -519,18 +671,24 @@ class CueShim:
 
 
 def main(ioc_path: str):
-    # local_base = pathlib.Path("/Users/klauer/Repos/epics-base")
-    # if local_base.exists():
-    #     introspection_base = local_base
+    local_base = pathlib.Path("/Users/klauer/Repos/epics-base")
+    if not local_base.exists():
+        introspection_paths = PcdsBuildPaths(
+            epics_base=pathlib.Path("/cds/group/pcds/epics/base/R7.0.2-2.0/"),
+            epics_site_top=pathlib.Path("/cds/group/pcds/epics/"),
+            epics_modules=pathlib.Path("/cds/group/pcds/epics/R7.0.2-2.0/modules"),
+        )
+    else:
+        introspection_paths = PcdsBuildPaths(
+            epics_base=local_base,
+            epics_site_top=local_base,
+            epics_modules=local_base,
+        )
 
     cue_shim = CueShim(
         target_path=pathlib.Path(ioc_path).resolve(),
         # For introspection
-        introspection_paths=PcdsBuildPaths(
-            epics_base=pathlib.Path("/cds/group/pcds/epics/base/R7.0.2-2.0/"),
-            epics_site_top=pathlib.Path("/cds/group/pcds/epics/"),
-            epics_modules=pathlib.Path("/cds/group/pcds/epics/R7.0.2-2.0/modules"),
-        ),
+        introspection_paths=introspection_paths,
         local=True,
     )
     # NOTE/TODO: use the 7.0.3.1-2.0 *branch* for noW:
@@ -541,7 +699,7 @@ def main(ioc_path: str):
     # cue_shim.use_epics_base("R7.0.3.1-2.0-branch")
     cue_shim.find_all_dependencies()
     cue_shim.write_set_to_file("defaults")
-    cue_shim.update_release_local()
+    cue_shim.update_makefiles()
     cue_shim.update_build_order()
     # TODO: slac-epics/epics-base has absolute /afs submodule paths :(
     cue_shim._cue.prepare(CueOptions())
