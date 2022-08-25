@@ -650,12 +650,15 @@ class CueShim:
         base_path = self.get_path_for_version_info(base_version)
 
         if build:
+            old_parallel = self._cue.ci['parallel_make']
+            self._cue.ci['parallel_make'] = 4
             cache_path = self.get_path_for_version_info(base_version)
             # TODO
             self._cue.places["EPICS_BASE"] = str(cache_path)
             self.module_release_local.touch(exist_ok=True)
             self._cue.setup_for_build(CueOptions())
             self._cue.call_make(cwd=str(cache_path), parallel=4, silent=True)
+            self._cue.ci['parallel_make'] = old_parallel
 
         self.introspection_paths = PcdsBuildPaths(
             epics_base=base_path,
