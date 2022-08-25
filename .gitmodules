@@ -4,3 +4,6 @@
 [submodule "support/whatrecord"]
 	path = support/whatrecord
 	url = https://github.com/klauer/whatrecord
+[submodule "ads-ioc"]
+	path = ads-ioc
+	url = https://github.com/klauer/ads-ioc
