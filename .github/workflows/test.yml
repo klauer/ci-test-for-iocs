@@ -28,6 +28,8 @@ jobs:
     env:
       CMP: gcc
       BCFG: default
+      # Required for our stuff:
+      EPICS_HOST_ARCH: rhel7-x86_64
       # BASE: "3.15"
     strategy:
       fail-fast: false
@@ -40,6 +42,10 @@ jobs:
         python-version: '3.10'
     - name: Install CI requirements
       run: python -m pip install git+https://github.com/klauer/whatrecord@enh_tweak_makefiles
+    - name: Install module requirements
+      run: |
+        sudo apt-get -y update
+        sudo apt-get -y install re2c
     - name: Download and build dependencies
       run: python prepare.py ads-ioc
     - name: Build the IOC
