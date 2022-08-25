@@ -215,6 +215,7 @@ class CueShim:
         self.variable_to_dependency = {}
         self.variable_to_version = {}
         self.introspection_paths = introspection_paths
+        self.target_path = target_path
         self.group = self._set_primary_target(target_path)
         self.set_path = set_path
         self.local = local
@@ -327,6 +328,7 @@ class CueShim:
 
             last_remaining = set(remaining)
 
+        logger.debug("Determined build order: %s", ", ".join(build_order))
         return build_order
 
     def create_set_text(self) -> str:
@@ -498,6 +500,7 @@ class CueShim:
 
         self._cue.add_dependency(cue_variable_name)
 
+        self.module_release_local.unlink(missing_ok=True)
         self.git_reset_repo_directory(variable_name, "configure")
         cache_path = self.get_path_for_version_info(version)
         makefile = self.get_makefile_for_path(cache_path)
@@ -529,9 +532,6 @@ class CueShim:
         :func:`VersionInfo.from_path`
         """
         checked = set()
-
-        # see note below about dependency ordering...
-        self.module_release_local.unlink(missing_ok=True)
 
         def done() -> bool:
             return all(
@@ -622,8 +622,29 @@ class CueShim:
             cache_path = self.get_path_for_version_info(base_version)
             # TODO
             self._cue.places["EPICS_BASE"] = str(cache_path)
+            self.module_release_local.touch(exist_ok=True)
             self._cue.setup_for_build(CueOptions())
             self._cue.call_make(cwd=str(cache_path), parallel=4, silent=True)
+
+    def _update_makefiles_in_path(self, base_path: pathlib.Path, makefile: Makefile):
+        for makefile_relative in makefile.makefile_list:
+            makefile_path = (base_path / makefile_relative).resolve()
+            try:
+                makefile_path.relative_to(base_path)
+            except ValueError:
+                logger.debug(
+                    "Skipping makefile: %s (not relative to %s)",
+                    makefile_path,
+                    base_path,
+                )
+                continue
+
+            try:
+                patch_makefile(makefile_path, self.makefile_variables_to_patch)
+            except PermissionError:
+                logger.error("Failed to patch makefile due to permissions: %s", makefile_path)
+            except Exception:
+                logger.exception("Failed to patch makefile: %s", makefile_path)
 
     def update_makefiles(self):
         """
@@ -642,22 +663,17 @@ class CueShim:
             if dep in ("EPICS_BASE", "BASE"):  # argh, why can't I remember which
                 continue
 
-            for makefile_relative in dep.makefile.makefile_list:
-                makefile = (dep_path / makefile_relative).resolve()
-                try:
-                    makefile.relative_to(dep_path)
-                except ValueError:
-                    logger.debug(
-                        "Skipping makefile: %s (not relative to %s)", makefile, dep_path
-                    )
-                    continue
+            self._update_makefiles_in_path(dep_path, dep.makefile)
 
-                try:
-                    patch_makefile(makefile, self.makefile_variables_to_patch)
-                except PermissionError:
-                    logger.error("Failed to patch makefile due to permissions: %s", makefile)
-                except Exception:
-                    logger.exception("Failed to patch makefile: %s", makefile)
+        self._update_makefiles_in_path(self.target_path, self.ioc_makefile)
+
+    @property
+    def ioc(self) -> Dependency:
+        return self.group.all_modules[self.group.root]
+
+    @property
+    def ioc_makefile(self) -> Makefile:
+        return self.ioc.makefile
 
     @property
     def makefile_variables_to_patch(self) -> Dict[str, str]:
@@ -681,10 +697,6 @@ class CueShim:
     def update_build_order(self) -> List[str]:
         """Update cue's build order of the modules to compile."""
         build_order = self.get_build_order()
-        logger.debug(
-            "Determined build order of modules for cue: %s",
-            ", ".join(build_order),
-        )
         self._cue.modules_to_compile[:] = [
             cue_set_name_overrides.get(variable, variable)
             for variable in build_order
@@ -723,12 +735,11 @@ def main(ioc_path: str):
     # cue_shim.use_epics_base("R7.0.3.1-2.0-branch")
     cue_shim.find_all_dependencies()
     cue_shim.write_set_to_file("defaults")
-    return
     cue_shim.update_makefiles()
     cue_shim.update_build_order()
     # TODO: slac-epics/epics-base has absolute /afs submodule paths :(
     cue_shim._cue.prepare(CueOptions())
-    cue_shim._cue.build(CueOptions())
+    cue_shim._cue.build(CueOptions(makeargs=["-C", str(cue_shim.target_path)]))
 
 
 if __name__ == "__main__":
