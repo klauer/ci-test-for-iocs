@@ -41,7 +41,14 @@ jobs:
       run: |
         sudo apt-get -y update
         sudo apt-get -y install re2c
+    - name: Configure cache for base and required modules
+      id: cache-primes
+      uses: actions/cache@v3
+      with:
+        path: ./cache
+        key: ${{ runner.os }}
+        # TODO -${{ hashFiles('**/files') }}
     - name: Download and build dependencies
-      run: python prepare.py ads-ioc
+      run: python prepare.py prepare ads-ioc
     - name: Build the IOC
-      run: python .ci/cue.py build -- -C ./ads-ioc
+      run: python prepare.py build ads-ioc
