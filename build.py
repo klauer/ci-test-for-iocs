@@ -37,11 +37,11 @@ cue_set_name_overrides = {
 @dataclass
 class PcdsBuildPaths:
     #: Path to epics-base.
-    epics_base: pathlib.Path
+    epics_base: pathlib.Path = pathlib.Path("/cds/group/pcds/epics/base/R7.0.2-2.0")
     #: Path to where epics-base and modules are contained.
-    epics_site_top: pathlib.Path
+    epics_site_top: pathlib.Path = pathlib.Path("/cds/group/pcds/")
     #: Path to where this specific epics-base has its modules.
-    epics_modules: pathlib.Path
+    epics_modules: pathlib.Path = pathlib.Path("/cds/group/pcds/epics/R7.0.2-2.0/modules")
 
     def to_variables(self) -> Dict[str, str]:
         """
@@ -189,7 +189,7 @@ class CueShim:
     introspection_paths: PcdsBuildPaths
     #: The top-level whatrecord dependency group which gets updated as we
     #: check out more dependencies.
-    group: DependencyGroup
+    group: Optional[DependencyGroup]
     #: The subdirectory of the cache path where modules are stored.  Kept this
     #: way for SLAC EPICS to have RELEASE_SITE there (TODO)
     module_cache_path: pathlib.Path
@@ -204,7 +204,6 @@ class CueShim:
     def __init__(
         self,
         target_path: pathlib.Path,
-        introspection_paths: PcdsBuildPaths,
         set_path: pathlib.Path = MODULE_PATH / "cache" / "sets",
         cache_path: pathlib.Path = MODULE_PATH / "cache",
         local: bool = False,
@@ -214,9 +213,9 @@ class CueShim:
         self.module_cache_path = cache_path / "modules"
         self.variable_to_dependency = {}
         self.variable_to_version = {}
-        self.introspection_paths = introspection_paths
+        self.introspection_paths = PcdsBuildPaths()
         self.target_path = target_path
-        self.group = self._set_primary_target(target_path)
+        self.group = None
         self.set_path = set_path
         self.local = local
         self.github_org = github_org
@@ -368,14 +367,9 @@ class CueShim:
             print(self.create_set_text(), file=fp)
         return set_filename
 
-    def _set_primary_target(self, path: pathlib.Path) -> DependencyGroup:
+    def _create_dependency_group(self) -> DependencyGroup:
         """
         Set the primary target - IOC or module - path.
-
-        Parameters
-        ----------
-        path : pathlib.Path
-            Path to the primary target.
 
         Returns
         -------
@@ -388,7 +382,13 @@ class CueShim:
         # release_site = path / "RELEASE_SITE"
         # if release_site.exists():
         #     shutil.copy(release_site, self.cache_path)
-        makefile = self.get_makefile_for_path(path)
+
+        # Make sure any previous modifications don't change our introspection efforts:
+        # TODO: instead, make the path matcher accept the cache directory, and
+        # match {cache_path}/modules/{module}-{version}
+        self.git_reset_repo_directory(None, "configure")
+
+        makefile = self.get_makefile_for_path(self.target_path)
         return DependencyGroup.from_makefile(makefile)
 
     def get_makefile_for_path(self, path: pathlib.Path) -> Makefile:
@@ -460,7 +460,7 @@ class CueShim:
                 logger.debug("cue setup %s=%r", key, value)
                 self._cue.setup[key] = value
 
-    def git_reset_repo_directory(self, variable_name: str, directory: str):
+    def git_reset_repo_directory(self, variable_name: Optional[str], directory: str):
         """
         Run git reset (or git checkout --) on a specific subdirectory
         of a dependency.
@@ -472,11 +472,16 @@ class CueShim:
         directory : str
             The subdirectory of that dependency.
         """
-        version = self.variable_to_version[variable_name]
-        module_path = self.get_path_for_version_info(version)
+        if variable_name is None:
+            module_path = self.target_path
+        else:
+            version = self.variable_to_version[variable_name]
+            module_path = self.get_path_for_version_info(version)
         self._cue.call_git(["checkout", "--", directory], cwd=str(module_path))
 
-    def add_dependency(self, variable_name: str, version: VersionInfo) -> Dependency:
+    def add_dependency(
+        self, variable_name: str, version: VersionInfo, add_to_group: bool = True
+    ) -> Optional[Dependency]:
         """
         Add a dependency identified by its variable name and version tag.
 
@@ -487,6 +492,9 @@ class CueShim:
         version : VersionInfo
             The version information for the dependency, either derived by way
             of introspection or manually.
+        add_to_group : bool, optional
+            Use whatrecord to introspect the dependency's makefile and add it to the
+            :class:`DependencyGroup` ``.group``.
 
         Returns
         -------
@@ -502,18 +510,23 @@ class CueShim:
 
         self.module_release_local.unlink(missing_ok=True)
         self.git_reset_repo_directory(variable_name, "configure")
-        cache_path = self.get_path_for_version_info(version)
-        makefile = self.get_makefile_for_path(cache_path)
-        dep = Dependency.from_makefile(
-            makefile,
-            recurse=True,
-            name=version.name,
-            variable_name=variable_name,
-            root=self.group,
-        )
-        self.variable_to_dependency[variable_name] = dep
 
-        return dep
+        if add_to_group:
+            self._check_group_is_ready()
+            cache_path = self.get_path_for_version_info(version)
+            makefile = self.get_makefile_for_path(cache_path)
+            dep = Dependency.from_makefile(
+                makefile,
+                recurse=True,
+                name=version.name,
+                variable_name=variable_name,
+                root=self.group,
+            )
+            self.variable_to_dependency[variable_name] = dep
+
+            return dep
+
+        return None
 
     @property
     def module_release_local(self) -> pathlib.Path:
@@ -521,6 +534,12 @@ class CueShim:
         The RELEASE.local file containing all dependencies, generated by cue.
         """
         return self.module_cache_path / "RELEASE.local"
+
+    def _check_group_is_ready(self):
+        if self.group is None:
+            raise RuntimeError("epics-base version not yet set")
+        if not self.introspection_paths.epics_base.exists():
+            raise RuntimeError("epics-base for introspection / building not present")
 
     def find_all_dependencies(self):
         """
@@ -533,13 +552,17 @@ class CueShim:
         """
         checked = set()
 
+        self._check_group_is_ready()
+
         def done() -> bool:
+            assert self.group is not None
             return all(
                 dep.variable_name in checked
                 for dep in self.group.all_modules.values()
             )
 
         while not done():
+            assert self.group is not None
             deps = list(self.group.all_modules.values())
             for dep in deps:
                 if dep.variable_name in checked:
@@ -547,11 +570,16 @@ class CueShim:
                 checked.add(dep.variable_name)
 
                 logger.debug(
-                    "Checking module for dependencies: %s. "
-                    "Existing dependencies: %s Missing paths: %s",
+                    (
+                        "Checking module %s for all dependencies. \n"
+                        "\nExisting dependencies:\n"
+                        "    %s"
+                        "\nMissing paths: \n"
+                        "    %s"
+                    ),
                     dep.variable_name or "this IOC",
-                    ", ".join(f"{var}={value}" for var, value in dep.dependencies.items()),
-                    ", ".join(f"{var}={value}" for var, value in dep.missing_paths.items()),
+                    "\n    ".join(f"{var}={value}" for var, value in dep.dependencies.items()),
+                    "\n    ".join(f"{var}={value}" for var, value in dep.missing_paths.items()),
                 )
 
                 for var, path in dep.missing_paths.items():
@@ -566,7 +594,7 @@ class CueShim:
                     version_info = VersionInfo.from_path(path)
                     if version_info is None:
                         logger.debug(
-                            "Dependency path for %r=%r does not match known patterns", var, path
+                            "Dependency path for %s=%s does not match known patterns", var, path
                         )
                         continue
 
@@ -617,7 +645,10 @@ class CueShim:
         #     # base/tag/...
         #     tagged_base_path
         # )
-        self.add_dependency("EPICS_BASE", base_version)
+        self.add_dependency("EPICS_BASE", base_version, add_to_group=False)
+
+        base_path = self.get_path_for_version_info(base_version)
+
         if build:
             cache_path = self.get_path_for_version_info(base_version)
             # TODO
@@ -626,17 +657,49 @@ class CueShim:
             self._cue.setup_for_build(CueOptions())
             self._cue.call_make(cwd=str(cache_path), parallel=4, silent=True)
 
+        self.introspection_paths = PcdsBuildPaths(
+            epics_base=base_path,
+            epics_site_top=pathlib.Path("/cds/group/pcds/"),
+            epics_modules=pathlib.Path(f"/cds/group/pcds/epics/{tag}/modules"),
+        )
+
+        self.group = self._create_dependency_group()
+        dep = self.group.all_modules[self.group.root]
+        logger.debug(
+            (
+                "Checking the primary target for dependencies after epics-base installation. \n"
+                "\nExisting dependencies:\n"
+                "    %s"
+                "\nMissing paths: \n"
+                "    %s"
+            ),
+            "\n    ".join(f"{var}={value}" for var, value in dep.dependencies.items()),
+            "\n    ".join(f"{var}={value}" for var, value in dep.missing_paths.items()),
+        )
+
     def _update_makefiles_in_path(self, base_path: pathlib.Path, makefile: Makefile):
+        """
+        Update makefiles found during the introspection step that exist in ``base_path``.
+
+        Updates module dependency paths based.
+
+        Parameters
+        ----------
+        base_path : pathlib.Path
+            The path to update makefiles under.
+        makefile : Makefile
+            The primary Makefile that contains paths of relevant included makefiles.
+        """
         for makefile_relative in makefile.makefile_list:
             makefile_path = (base_path / makefile_relative).resolve()
             try:
                 makefile_path.relative_to(base_path)
             except ValueError:
-                logger.debug(
-                    "Skipping makefile: %s (not relative to %s)",
-                    makefile_path,
-                    base_path,
-                )
+                # logger.debug(
+                #     "Skipping makefile: %s (not relative to %s)",
+                #     makefile_path,
+                #     base_path,
+                # )
                 continue
 
             try:
@@ -669,6 +732,8 @@ class CueShim:
 
     @property
     def ioc(self) -> Dependency:
+        self._check_group_is_ready()
+        assert self.group is not None
         return self.group.all_modules[self.group.root]
 
     @property
@@ -705,31 +770,13 @@ class CueShim:
 
 
 def main(ioc_path: str):
-    local_base = (MODULE_PATH / "epics-base").resolve()
-    if not local_base.exists():
-        introspection_paths = PcdsBuildPaths(
-            epics_base=pathlib.Path("/cds/group/pcds/epics/base/R7.0.2-2.0/"),
-            epics_site_top=pathlib.Path("/cds/group/pcds/epics/"),
-            epics_modules=pathlib.Path("/cds/group/pcds/epics/R7.0.2-2.0/modules"),
-        )
-    else:
-        introspection_paths = PcdsBuildPaths(
-            epics_base=local_base,
-            epics_site_top=local_base,
-            epics_modules=local_base,
-        )
-
     cue_shim = CueShim(
         target_path=pathlib.Path(ioc_path).resolve(),
-        introspection_paths=introspection_paths,
         local=True,
     )
     # NOTE/TODO: use the 7.0.3.1-2.0 *branch* for noW:
     # R7.0.3.1-2.0 is a branch, whereas R7.0.3.1-2.0.1 is a tag;
     cue_shim.use_epics_base("R7.0.2-2.branch")
-    cue_shim.introspection_paths.epics_base = cue_shim.get_path_for_version_info(
-        cue_shim.variable_to_version["EPICS_BASE"]
-    )
     # /cds/group/pcds/epics/base/R7.0.3.1-2.0 is where all minor local fixes
     # go for 7.0.3.1-2.0.
     # cue_shim.use_epics_base("R7.0.3.1-2.0-branch")
