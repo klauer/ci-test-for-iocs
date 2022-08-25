@@ -2,13 +2,14 @@
 from __future__ import annotations
 
 import dataclasses
+import functools
 import logging
 import os
 import pathlib
 import re
 import sys
 from dataclasses import dataclass, field
-from typing import Any, ClassVar, Dict, List, Optional, Set
+from typing import Any, Callable, ClassVar, Dict, List, Optional, Set
 
 import cue
 from whatrecord.makefile import Dependency, DependencyGroup, Makefile
@@ -32,6 +33,39 @@ repo_name_overrides = {
 cue_set_name_overrides = {
     "EPICS_BASE": "BASE",
 }
+
+is_local = "GITHUB_ACTIONS" in os.environ
+
+
+def folded_output(title: str = ""):
+    """
+    Fold the function output in GitHub actions logs.
+
+    Wrapper for a method or other function.
+
+    Parameters
+    ----------
+    title : str, optional
+        The title to show. Defaults to the function name.
+    """
+
+    def wrapper(func: Callable) -> Callable:
+        if is_local:
+            return func
+
+        nonlocal title
+
+        if not title:
+            title = func.__name__
+
+        tag = re.sub("[^0-9a-zA-Z_]+", ".", title)
+
+        @functools.wraps(func)
+        def wrapped(*args, **kwargs):
+            with cue.Folded(tag, title):
+                return func(*args, **kwargs)
+        return wrapped
+    return wrapper
 
 
 @dataclass
@@ -541,6 +575,7 @@ class CueShim:
         if not self.introspection_paths.epics_base.exists():
             raise RuntimeError("epics-base for introspection / building not present")
 
+    @folded_output("Finding all dependencies...")
     def find_all_dependencies(self):
         """
         Using module path conventions, find all dependencies and check them
@@ -709,6 +744,7 @@ class CueShim:
             except Exception:
                 logger.exception("Failed to patch makefile: %s", makefile_path)
 
+    @folded_output("Updating makefiles")
     def update_makefiles(self):
         """
         Updates all makefiles with appropriate paths.
@@ -771,26 +807,38 @@ class CueShim:
 
 def main(command: str, ioc_path: str):
     assert command in ("prepare", "build")
-    cue_shim = CueShim(
-        target_path=pathlib.Path(ioc_path).resolve(),
-        local="GITHUB_ACTIONS" not in os.environ,
-    )
     preparing = command == "prepare"
+
+    with cue.Folded("cue.shim", "Preparing the cue shim..."):
+        cue_shim = CueShim(
+            target_path=pathlib.Path(ioc_path).resolve(),
+            local="GITHUB_ACTIONS" not in os.environ,
+        )
+
     # NOTE/TODO: use the 7.0.3.1-2.0 *branch* for noW:
     # R7.0.3.1-2.0 is a branch, whereas R7.0.3.1-2.0.1 is a tag;
-    cue_shim.use_epics_base("R7.0.2-2.branch", build=preparing)
+
+    with cue.Folded("use.epics.base", "Preparing EPICS base..."):
+        cue_shim.use_epics_base("R7.0.2-2.branch", build=preparing)
+
     # /cds/group/pcds/epics/base/R7.0.3.1-2.0 is where all minor local fixes
     # go for 7.0.3.1-2.0.
     # cue_shim.use_epics_base("R7.0.3.1-2.0-branch")
     if preparing:
         cue_shim.find_all_dependencies()
-        cue_shim.write_set_to_file("defaults")
+        with cue.Folded("write.set", "Writing the default set..."):
+            cue_shim.write_set_to_file("defaults")
+
         cue_shim.update_makefiles()
-        cue_shim.update_build_order()
-        # TODO: slac-epics/epics-base has absolute /afs submodule paths :(
-        cue_shim._cue.prepare(CueOptions())
+        with cue.Folded("update.makefiles", "Updating the build order..."):
+            cue_shim.update_build_order()
+
+        with cue.Folded("cue.prepare", "Calling cue.prepare..."):
+            # TODO: slac-epics/epics-base has absolute /afs submodule paths :(
+            cue_shim._cue.prepare(CueOptions())
     else:
-        cue_shim._cue.build(CueOptions(makeargs=["-C", str(cue_shim.target_path)]))
+        with cue.Folded("cue.build", "Calling cue.build..."):
+            cue_shim._cue.build(CueOptions(makeargs=["-C", str(cue_shim.target_path)]))
 
 
 if __name__ == "__main__":
