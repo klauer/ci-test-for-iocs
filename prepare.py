@@ -650,15 +650,12 @@ class CueShim:
         base_path = self.get_path_for_version_info(base_version)
 
         if build:
-            old_parallel = self._cue.ci['parallel_make']
-            self._cue.ci['parallel_make'] = 4
             cache_path = self.get_path_for_version_info(base_version)
             # TODO
             self._cue.places["EPICS_BASE"] = str(cache_path)
             self.module_release_local.touch(exist_ok=True)
             self._cue.setup_for_build(CueOptions())
             self._cue.call_make(cwd=str(cache_path), parallel=4, silent=True)
-            self._cue.ci['parallel_make'] = old_parallel
 
         self.introspection_paths = PcdsBuildPaths(
             epics_base=base_path,
@@ -772,27 +769,31 @@ class CueShim:
         return build_order
 
 
-def main(ioc_path: str):
+def main(command: str, ioc_path: str):
+    assert command in ("prepare", "build")
     cue_shim = CueShim(
         target_path=pathlib.Path(ioc_path).resolve(),
-        local=True,
+        local="GITHUB_ACTIONS" not in os.environ,
     )
+    preparing = command == "prepare"
     # NOTE/TODO: use the 7.0.3.1-2.0 *branch* for noW:
     # R7.0.3.1-2.0 is a branch, whereas R7.0.3.1-2.0.1 is a tag;
-    cue_shim.use_epics_base("R7.0.2-2.branch")
+    cue_shim.use_epics_base("R7.0.2-2.branch", build=preparing)
     # /cds/group/pcds/epics/base/R7.0.3.1-2.0 is where all minor local fixes
     # go for 7.0.3.1-2.0.
     # cue_shim.use_epics_base("R7.0.3.1-2.0-branch")
-    cue_shim.find_all_dependencies()
-    cue_shim.write_set_to_file("defaults")
-    cue_shim.update_makefiles()
-    cue_shim.update_build_order()
-    # TODO: slac-epics/epics-base has absolute /afs submodule paths :(
-    cue_shim._cue.prepare(CueOptions())
-    # cue_shim._cue.build(CueOptions(makeargs=["-C", str(cue_shim.target_path)]))
+    if preparing:
+        cue_shim.find_all_dependencies()
+        cue_shim.write_set_to_file("defaults")
+        cue_shim.update_makefiles()
+        cue_shim.update_build_order()
+        # TODO: slac-epics/epics-base has absolute /afs submodule paths :(
+        cue_shim._cue.prepare(CueOptions())
+    else:
+        cue_shim._cue.build(CueOptions(makeargs=["-C", str(cue_shim.target_path)]))
 
 
 if __name__ == "__main__":
     logging.basicConfig(level="WARNING")
     logger.setLevel("DEBUG")
-    main(ioc_path=sys.argv[1])
+    main(command=sys.argv[1], ioc_path=sys.argv[2])
