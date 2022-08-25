@@ -28,19 +28,19 @@ jobs:
     env:
       CMP: gcc
       BCFG: default
-      BASE: "3.15"
+      # BASE: "3.15"
     strategy:
       fail-fast: false
-
     steps:
     - uses: actions/checkout@v2
       with:
         submodules: true
-    - name: Prepare and compile dependencies
-      run: python .ci/cue.py prepare
-    - name: Build main module
-      run: python .ci/cue.py build
-    - name: Run main module tests
-      run: python .ci/cue.py test
-    - name: Collect and show test results
-      run: python .ci/cue.py test-results
+    - uses: actions/setup-python@v4
+      with:
+        python-version: '3.10'
+    - name: Install CI requirements
+      run: python -m pip install git+https://github.com/klauer/whatrecord@enh_tweak_makefiles
+    - name: Download and build dependencies
+      run: python prepare.py ads-ioc
+    - name: Build the IOC
+      run: python .ci/cue.py build -- -C ./ads-ioc

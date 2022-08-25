@@ -786,7 +786,7 @@ def main(ioc_path: str):
     cue_shim.update_build_order()
     # TODO: slac-epics/epics-base has absolute /afs submodule paths :(
     cue_shim._cue.prepare(CueOptions())
-    cue_shim._cue.build(CueOptions(makeargs=["-C", str(cue_shim.target_path)]))
+    # cue_shim._cue.build(CueOptions(makeargs=["-C", str(cue_shim.target_path)]))
 
 
 if __name__ == "__main__":
