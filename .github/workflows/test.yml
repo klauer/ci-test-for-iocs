@@ -1,11 +1,6 @@
-# .github/workflows/ci-scripts-build.yml for use with EPICS Base ci-scripts
+# Modified version of epics-base CI scripts
 # (see: https://github.com/epics-base/ci-scripts)
-
-# This is YAML - indentation levels are crucial
-
-# Set the 'name:' properties to values that work for you
-
-name: MYMODULE
+name: ads-ioc
 
 # Trigger on pushes and PRs to any branch
 on:
@@ -21,7 +16,7 @@ env:
 
 jobs:
   build-linux:
-    name: "Name"
+    name: "test build"
     runs-on: ubuntu-20.04
     #${{ matrix.os }}
     # Set environment variables from matrix parameters
