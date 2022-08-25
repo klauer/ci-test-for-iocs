@@ -50,5 +50,7 @@ jobs:
         # TODO -${{ hashFiles('**/files') }}
     - name: Download and build dependencies
       run: python prepare.py prepare ads-ioc
+    - name: Check the cache directory
+      run: ls -la ./cache
     - name: Build the IOC
       run: python prepare.py build ads-ioc

@@ -514,7 +514,11 @@ class CueShim:
         self._cue.call_git(["checkout", "--", directory], cwd=str(module_path))
 
     def add_dependency(
-        self, variable_name: str, version: VersionInfo, add_to_group: bool = True
+        self,
+        variable_name: str,
+        version: VersionInfo,
+        add_to_group: bool = True,
+        reset_configure: bool = False,
     ) -> Optional[Dependency]:
         """
         Add a dependency identified by its variable name and version tag.
@@ -529,6 +533,9 @@ class CueShim:
         add_to_group : bool, optional
             Use whatrecord to introspect the dependency's makefile and add it to the
             :class:`DependencyGroup` ``.group``.
+        reset_configure : bool, optional
+            Reset module/configure/* to the git HEAD, if changed.
+            (TODO) also reset RELEASE.local
 
         Returns
         -------
@@ -542,8 +549,9 @@ class CueShim:
 
         self._cue.add_dependency(cue_variable_name)
 
-        self.module_release_local.unlink(missing_ok=True)
-        self.git_reset_repo_directory(variable_name, "configure")
+        if reset_configure:
+            self.module_release_local.unlink(missing_ok=True)
+            self.git_reset_repo_directory(variable_name, "configure")
 
         if add_to_group:
             self._check_group_is_ready()
@@ -642,7 +650,7 @@ class CueShim:
                         dep.dependencies[var],
                     )
 
-    def use_epics_base(self, tag: str, build: bool = True):
+    def use_epics_base(self, tag: str, build: bool = True, reset_configure: bool = True):
         """
         Add EPICS_BASE as a dependency given the provided tag.
 
@@ -652,6 +660,8 @@ class CueShim:
             The epics-base tag to use.
         build : bool, optional
             Build epics-base now.  Defaults to False.
+        reset_configure : bool, optional
+            Reset epics-base/configure/* to the git HEAD, if changed.
         """
         # "building base" means that the ci script is used _just_ for epics-base
         # and is located in the current working directory (".").  Don't set it
@@ -680,7 +690,12 @@ class CueShim:
         #     # base/tag/...
         #     tagged_base_path
         # )
-        self.add_dependency("EPICS_BASE", base_version, add_to_group=False)
+        self.add_dependency(
+            "EPICS_BASE",
+            base_version,
+            reset_configure=reset_configure,
+            add_to_group=False,
+        )
 
         base_path = self.get_path_for_version_info(base_version)
 
@@ -819,7 +834,7 @@ def main(command: str, ioc_path: str):
     # R7.0.3.1-2.0 is a branch, whereas R7.0.3.1-2.0.1 is a tag;
 
     with cue.Folded("use.epics.base", "Preparing EPICS base..."):
-        cue_shim.use_epics_base("R7.0.2-2.branch", build=preparing)
+        cue_shim.use_epics_base("R7.0.2-2.branch", build=preparing, reset_configure=preparing)
 
     # /cds/group/pcds/epics/base/R7.0.3.1-2.0 is where all minor local fixes
     # go for 7.0.3.1-2.0.
