@@ -518,7 +518,7 @@ class CueShim:
         variable_name: str,
         version: VersionInfo,
         add_to_group: bool = True,
-        reset_configure: bool = False,
+        reset_configure: bool = True,
     ) -> Optional[Dependency]:
         """
         Add a dependency identified by its variable name and version tag.
@@ -535,7 +535,7 @@ class CueShim:
             :class:`DependencyGroup` ``.group``.
         reset_configure : bool, optional
             Reset module/configure/* to the git HEAD, if changed.
-            (TODO) also reset RELEASE.local
+            (TODO) also reset modules/RELEASE.local
 
         Returns
         -------
