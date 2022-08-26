@@ -840,21 +840,21 @@ def main(command: str, ioc_path: str):
     # /cds/group/pcds/epics/base/R7.0.3.1-2.0 is where all minor local fixes
     # go for 7.0.3.1-2.0.
     # cue_shim.use_epics_base("R7.0.3.1-2.0-branch")
-    if preparing:
-        cue_shim.find_all_dependencies()
-        with cue.Folded("write.set", "Writing the default set..."):
-            cue_shim.write_set_to_file("defaults")
+    # if preparing:
+    cue_shim.find_all_dependencies()
+    with cue.Folded("write.set", "Writing the default set..."):
+        cue_shim.write_set_to_file("defaults")
 
-        cue_shim.update_makefiles()
-        with cue.Folded("update.makefiles", "Updating the build order..."):
-            cue_shim.update_build_order()
+    cue_shim.update_makefiles()
+    with cue.Folded("update.makefiles", "Updating the build order..."):
+        cue_shim.update_build_order()
 
-        with cue.Folded("cue.prepare", "Calling cue.prepare..."):
-            # TODO: slac-epics/epics-base has absolute /afs submodule paths :(
-            cue_shim._cue.prepare(CueOptions())
-    else:
-        with cue.Folded("cue.build", "Calling cue.build..."):
-            cue_shim._cue.build(CueOptions(makeargs=["-C", str(cue_shim.target_path)]))
+    with cue.Folded("cue.prepare", "Calling cue.prepare..."):
+        # TODO: slac-epics/epics-base has absolute /afs submodule paths :(
+        cue_shim._cue.prepare(CueOptions())
+    # else:
+    with cue.Folded("cue.build", "Calling cue.build..."):
+        cue_shim._cue.build(CueOptions(makeargs=["-C", str(cue_shim.target_path)]))
 
 
 if __name__ == "__main__":
